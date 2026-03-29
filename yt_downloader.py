@@ -12,65 +12,93 @@ print("Убедись, что запущен zapret-discord-youtube > general(FA
 # Отключаем проверку SSL
 # ssl._create_default_https_context = ssl._create_unverified_context
 
-def download_format(url, format_id, headers, convert_to_mp3, output_path="downloads"):
+def download_format(url, format_id, headers, convert_to_mp3, output_path="downloads", merge_formats=None):
     """Скачивает выбранный формат"""
     Path(output_path).mkdir(exist_ok=True)
-    
-    ydl_opts = {
-        'format': format_id,
-        'outtmpl': os.path.join(output_path, '%(title).100s.%(ext)s'),
-        
-        # Настройка QuickJS (ТОЧНО ТАК ЖЕ КАК В get_video_info)
-        
-        'remote_components': ['ejs:github'],
-        # 'nocheckcertificate': True,
-        
-        # Упрощаем заголовки (убираем излишнее)
-        'user_agent': headers['User-Agent'],
-        'http_headers': headers,
-        
-        # Базовые параметры загрузки
-        'retries': 10,
-        'fragment_retries': 10,
-        'skip_unavailable_fragments': True,
 
-        # Добавляем cookies если есть
-        'cookiefile': 'exported-cookies.txt' if os.path.exists('exported-cookies.txt') else None,
-        
-    }
-    
-    if platform.system != 'Linux':
-        ydl_opts['js_runtimes'] = {
-            'quickjs': {
-                'path': QUICKJS_PATH
-            }
+    is_video_audio_merge = '+' in str(format_id)
+
+    def build_ydl_opts(merge_output_format=None):
+        ydl_opts = {
+            'format': format_id,
+            'outtmpl': os.path.join(output_path, '%(title).100s.%(ext)s'),
+
+            'remote_components': ['ejs:github'],
+
+            # Упрощаем заголовки (убираем излишнее)
+            'user_agent': headers['User-Agent'],
+            'http_headers': headers,
+
+            # Базовые параметры загрузки
+            'retries': 10,
+            'fragment_retries': 10,
+            'skip_unavailable_fragments': True,
+
+            # Добавляем cookies если есть
+            'cookiefile': 'exported-cookies.txt' if os.path.exists('exported-cookies.txt') else None,
         }
 
-    # Добавляем конвертацию в MP3 если нужно
-    if convert_to_mp3:
-        ydl_opts['postprocessors'] = [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }]
-    
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            print(f"📥 Скачивание формата ID: {format_id}...")
-            ydl.download([url])
-            print("✅ Загрузка завершена!")
-            return True
-    except Exception as e:
-        print(f"❌ Ошибка при скачивании: {e}")
-        return False
+        if platform.system() != 'Linux':
+            ydl_opts['js_runtimes'] = {
+                'quickjs': {
+                    'path': QUICKJS_PATH
+                }
+            }
+
+        # Конвертация в MP3 разрешена только для чистого аудио
+        if convert_to_mp3 and not is_video_audio_merge:
+            ydl_opts['postprocessors'] = [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }]
+
+        # Настройки объединения видео+аудио
+        if is_video_audio_merge and merge_output_format:
+            ydl_opts['merge_output_format'] = merge_output_format
+
+        return ydl_opts
+
+    # Для video+audio делаем попытку MP4, при проблемах — fallback в MKV
+    if is_video_audio_merge:
+        if merge_formats:
+            merge_attempts = [(fmt, fmt.upper()) for fmt in merge_formats]
+        else:
+            merge_attempts = [('mp4', 'MP4'), ('mkv', 'MKV')]
+    else:
+        merge_attempts = [(None, None)]
+
+    last_error = None
+    for merge_fmt, merge_label in merge_attempts:
+        try:
+            with yt_dlp.YoutubeDL(build_ydl_opts(merge_output_format=merge_fmt)) as ydl:
+                if is_video_audio_merge:
+                    print(f"📥 Скачивание и объединение (в {merge_label}) форматов: {format_id}...")
+                else:
+                    print(f"📥 Скачивание формата ID: {format_id}...")
+                ydl.download([url])
+                print("✅ Загрузка завершена!")
+                return True
+        except Exception as e:
+            last_error = e
+            if not is_video_audio_merge:
+                break
+            if merge_fmt == 'mp4':
+                print(f"⚠️ Не удалось объединить в MP4: {e}")
+                print("🔁 Пробуем объединение в MKV...")
+            else:
+                break
+
+    print(f"❌ Ошибка при скачивании: {last_error}")
+    return False
 
 def main():
     print("=== YouTube Downloader ===")
     test_connection()
     while True:
         url = input("\n🎬 Введите URL YouTube видео (или 'quit' для выхода): ").strip()
-        if (url == ""):
-          url = "https://www.youtube.com/watch?v=HpyVBF03vI8"
+        # if (url == ""):
+        #   url = "https://www.youtube.com/watch?v=HpyVBF03vI8"
         if url.lower() in ['quit', 'exit', 'q']:
             break
             
@@ -136,15 +164,57 @@ def main():
             else:
                 print("⚠️ Неверный выбор, используем лучший аудио")
                 format_id = 'bestaudio'
+
+            merge_formats = None
+
+            # Если выбран формат "только видео", автоматически подбираем аудио и объединяем
+            if format_type == 'video' and selected_format:
+                def pick_best_audio(formats, prefer_m4a=False):
+                    if not formats:
+                        return None
+                    candidates = formats
+                    if prefer_m4a:
+                        m4a = [f for f in formats if (f.get('ext') or '').lower() == 'm4a']
+                        if m4a:
+                            candidates = m4a
+                    return max(candidates, key=lambda f: (f.get('abr') or 0))
+
+                video_ext = (selected_format.get('ext') or '').lower()
+                # Если выбрано MP4-видео — берем m4a (AAC) чтобы MP4 точно был со звуком
+                prefer_m4a = video_ext == 'mp4'
+                best_audio = pick_best_audio(audio_formats, prefer_m4a=prefer_m4a)
+                if best_audio:
+                    video_id = selected_format['id']
+                    audio_id = best_audio['id']
+                    format_id = f"{video_id}+{audio_id}"
+                    audio_ext = (best_audio.get('ext') or '').lower()
+
+                    # Выбор контейнера для merge:
+                    # - mp4+ m4a -> mp4
+                    # - иначе сразу mkv (чтобы не получить mp4 без звука у некоторых плееров)
+                    if video_ext == 'mp4' and audio_ext == 'm4a':
+                        merge_formats = ['mp4', 'mkv']
+                        merge_note = "MP4 (fallback в MKV при несовместимости)"
+                    else:
+                        merge_formats = ['mkv']
+                        merge_note = "MKV (чтобы гарантировать воспроизведение звука)"
+
+                    print(
+                        f"🎬 Выбрано видео ID {video_id} ({video_ext or 'n/a'}); "
+                        f"автоматически выбрано аудио ID {audio_id} ({best_audio.get('abr', 0)}kbps, {audio_ext or 'n/a'})."
+                    )
+                    print(f"🔧 Будет выполнено объединение в {merge_note}.")
+                else:
+                    print("⚠️ Аудио форматы не найдены — скачиваю только видео без объединения.")
             
-            # Спрашиваем о конвертации для аудио форматов
-            convert_to_mp3 = True
+            # Конвертация в MP3 только для аудио-форматов; видео оставляем как есть
+            convert_to_mp3 = False
             if format_type == 'audio':
                 convert_option = input("🎵 Конвертировать в MP3? (y/N): ").strip().lower()
                 convert_to_mp3 = convert_option == 'y' or convert_option == ""
             
             # Скачиваем
-            download_format(url, format_id, headers, convert_to_mp3)
+            download_format(url, format_id, headers, convert_to_mp3, merge_formats=merge_formats)
             
         except Exception as e:
             print(f"❌ Ошибка: {e}")
