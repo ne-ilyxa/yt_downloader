@@ -3,6 +3,7 @@ import os
 import ssl
 from pathlib import Path
 import sys
+import re
 from get_info import *
 import random 
 import platform
@@ -126,6 +127,15 @@ def main():
         try:
             choice = input(f"\n🎯 Выберите номер формата (1-{len(all_formats)}) или Enter для лучшего аудио: ").strip()
             
+            def find_by_display_id(display_id: int):
+                for ft, fi in all_formats:
+                    if fi.get('display_id') == display_id:
+                        return ft, fi
+                return None, None
+
+            merge_formats = None
+            manual_av_pair = False
+
             if choice == '':
                 # Автоматически выбираем лучший аудио формат
                 format_type, selected_format = None, None
@@ -143,17 +153,53 @@ def main():
                 
                 format_id = selected_format['id']
                 print(f"🎵 Автоматически выбран: ID {format_id} ({selected_format['abr']}kbps)")
-                
+
+            elif re.fullmatch(r"\d+\s*\+\s*\d+", choice):
+                left, right = [int(x.strip()) for x in choice.split("+", 1)]
+                left_type, left_fmt = find_by_display_id(left)
+                right_type, right_fmt = find_by_display_id(right)
+
+                if not left_fmt or not right_fmt:
+                    raise ValueError("Один из указанных форматов не найден")
+
+                # ожидаемый порядок: audio+video, но разрешаем и video+audio
+                if left_type == 'audio' and right_type == 'video':
+                    audio_fmt, video_fmt = left_fmt, right_fmt
+                elif left_type == 'video' and right_type == 'audio':
+                    audio_fmt, video_fmt = right_fmt, left_fmt
+                else:
+                    raise ValueError("Формат вида A+B должен быть 'аудио+видео' (или 'видео+аудио')")
+
+                audio_id = audio_fmt['id']
+                video_id = video_fmt['id']
+                format_id = f"{video_id}+{audio_id}"
+                manual_av_pair = True
+
+                audio_ext = (audio_fmt.get('ext') or '').lower()
+                video_ext = (video_fmt.get('ext') or '').lower()
+
+                format_type = 'video'
+                selected_format = video_fmt
+
+                if video_ext == 'mp4' and audio_ext == 'm4a':
+                    merge_formats = ['mp4', 'mkv']
+                    merge_note = "MP4 (fallback в MKV при несовместимости)"
+                else:
+                    merge_formats = ['mkv']
+                    merge_note = "MKV (чтобы гарантировать воспроизведение звука)"
+
+                print(
+                    f"🎯 Ручной выбор: аудио №{left if left_type=='audio' else right} (ID {audio_id}, {audio_ext or 'n/a'}) + "
+                    f"видео №{right if right_type=='video' else left} (ID {video_id}, {video_ext or 'n/a'})."
+                )
+                print(f"🔧 Будет выполнено объединение в {merge_note}.")
+
             elif choice.isdigit() and 1 <= int(choice) <= len(all_formats):
                 # Находим выбранный формат
                 selected_format = None
                 format_type = None
                 
-                for fmt_type, fmt_info in all_formats:
-                    if fmt_info['display_id'] == int(choice):
-                        selected_format = fmt_info
-                        format_type = fmt_type
-                        break
+                format_type, selected_format = find_by_display_id(int(choice))
                 
                 if selected_format:
                     format_id = selected_format['id']
@@ -165,10 +211,8 @@ def main():
                 print("⚠️ Неверный выбор, используем лучший аудио")
                 format_id = 'bestaudio'
 
-            merge_formats = None
-
             # Если выбран формат "только видео", автоматически подбираем аудио и объединяем
-            if format_type == 'video' and selected_format:
+            if format_type == 'video' and selected_format and not manual_av_pair:
                 def pick_best_audio(formats, prefer_m4a=False):
                     if not formats:
                         return None
@@ -210,8 +254,8 @@ def main():
             # Конвертация в MP3 только для аудио-форматов; видео оставляем как есть
             convert_to_mp3 = False
             if format_type == 'audio':
-                convert_option = input("🎵 Конвертировать в MP3? (y/N): ").strip().lower()
-                convert_to_mp3 = convert_option == 'y' or convert_option == ""
+                convert_to_mp3 = True
+                print("🎵 Аудио будет автоматически конвертировано в MP3.")
             
             # Скачиваем
             download_format(url, format_id, headers, convert_to_mp3, merge_formats=merge_formats)

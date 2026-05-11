@@ -187,8 +187,8 @@ def display_formats(audio_formats, video_formats, combined_formats):
     
     # Видео форматы (только видео)
     if video_formats:
-        print(f"\n📹 ТОЛЬКО ВИДЕО ({len(video_formats)}):")
-        print("-" * 80)
+        # print(f"\n📹 ВИДЕО({len(video_formats)}):")
+        # print("-" * 80)
         
         for fmt in sorted(video_formats, 
                          key=lambda x: (x['resolution'], x['fps']), 
